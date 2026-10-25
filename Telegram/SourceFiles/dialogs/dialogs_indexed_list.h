@@ -20,7 +20,7 @@ class IndexedList {
 public:
 	IndexedList(SortMode sortMode, FilterId filterId = 0);
 
-	RowsByLetter addToEnd(Key key);
+	RowsByLetter addToEnd(Key key, bool indexName = true);
 	Row *addByName(Key key);
 	void adjustByDate(const RowsByLetter &links);
 	void moveToTop(Key key);

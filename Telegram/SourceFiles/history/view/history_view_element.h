@@ -848,6 +848,7 @@ private:
 	};
 	[[nodiscard]] TextWithLinks contextDependentServiceText();
 
+	std::unique_ptr<rpl::lifetime> _chatcraftLifetime;
 	const not_null<ElementDelegate*> _delegate;
 	const not_null<HistoryItem*> _data;
 	HistoryBlock *_block = nullptr;

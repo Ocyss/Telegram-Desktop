@@ -9,6 +9,28 @@ option(TDESKTOP_BUILD_UPDATE_TESTS "Build the focused update verification test."
 set(TDESKTOP_API_ID "0" CACHE STRING "Provide 'api_id' for the Telegram API access.")
 set(TDESKTOP_API_HASH "" CACHE STRING "Provide 'api_hash' for the Telegram API access.")
 
+option(CHATCRAFT_ENABLED "Enable the native Chatcraft settings integration." ${WIN32})
+set(CHATCRAFT_API_ID "" CACHE STRING "Chatcraft Telegram API id.")
+set(CHATCRAFT_API_HASH "" CACHE STRING "Chatcraft Telegram API hash.")
+set(CHATCRAFT_MAX_ACCOUNTS "10" CACHE STRING "Maximum Chatcraft accounts.")
+
+if (CHATCRAFT_ENABLED)
+    if (NOT CHATCRAFT_MAX_ACCOUNTS MATCHES "^[1-9][0-9]*$"
+        OR CHATCRAFT_MAX_ACCOUNTS GREATER 100)
+        message(FATAL_ERROR "CHATCRAFT_MAX_ACCOUNTS must be between 1 and 100.")
+    endif()
+    if (NOT CHATCRAFT_API_ID STREQUAL "")
+        set(TDESKTOP_API_ID "${CHATCRAFT_API_ID}")
+    endif()
+    if (NOT CHATCRAFT_API_HASH STREQUAL "")
+        set(TDESKTOP_API_HASH "${CHATCRAFT_API_HASH}")
+    endif()
+    target_compile_definitions(Telegram PRIVATE
+        CHATCRAFT_ENABLED=1
+        CHATCRAFT_MAX_ACCOUNTS=${CHATCRAFT_MAX_ACCOUNTS}
+    )
+endif()
+
 if (TDESKTOP_API_TEST)
     set(TDESKTOP_API_ID 17349)
     set(TDESKTOP_API_HASH 344583e45741c457fe1862106095a5eb)
@@ -37,7 +59,7 @@ if (TDESKTOP_API_ID STREQUAL "0" OR TDESKTOP_API_HASH STREQUAL "")
     " ")
 endif()
 
-if (DESKTOP_APP_DISABLE_AUTOUPDATE)
+if (DESKTOP_APP_DISABLE_AUTOUPDATE OR CHATCRAFT_ENABLED)
     target_compile_definitions(Telegram PRIVATE TDESKTOP_DISABLE_AUTOUPDATE)
 endif()
 

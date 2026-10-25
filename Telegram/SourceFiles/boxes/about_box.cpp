@@ -154,6 +154,9 @@ namespace {
 
 [[nodiscard]] QString CurrentVersionText(bool withCommit) {
 	auto result = QString::fromLatin1(AppVersionStr);
+#ifdef CHATCRAFT_ENABLED
+	result += u" +Chatcraft"_q;
+#endif // CHATCRAFT_ENABLED
 	if (Core::BuildIsCanary) {
 		result += Core::CanaryVersionSuffix();
 	} else if (cAlphaVersion()) {

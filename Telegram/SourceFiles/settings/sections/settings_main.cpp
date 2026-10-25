@@ -7,6 +7,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "settings/sections/settings_main.h"
 
+#include "chatcraft/chatcraft_settings.h"
+
 #include "settings/settings_common_session.h"
 
 #include "api/api_cloud_password.h"
@@ -369,6 +371,7 @@ void BuildSectionButtons(SectionBuilder &builder) {
 
 	if (!session->supportMode()) {
 		builder.addButton({
+			.id = u"main/profile"_q,
 			.title = tr::lng_settings_my_account(),
 			.icon = { &st::menuIconProfile },
 			.onClick = [=] {
@@ -380,6 +383,7 @@ void BuildSectionButtons(SectionBuilder &builder) {
 	}
 
 	builder.addSectionButton({
+		.id = u"main/notifications"_q,
 		.title = tr::lng_settings_section_notify(),
 		.targetSection = NotificationsId(),
 		.icon = { &st::menuIconNotifications },
@@ -387,6 +391,7 @@ void BuildSectionButtons(SectionBuilder &builder) {
 	});
 
 	builder.addSectionButton({
+		.id = u"main/privacy"_q,
 		.title = tr::lng_settings_section_privacy(),
 		.targetSection = PrivacySecurityId(),
 		.icon = { &st::menuIconLock },
@@ -394,6 +399,7 @@ void BuildSectionButtons(SectionBuilder &builder) {
 	});
 
 	builder.addSectionButton({
+		.id = u"main/chat"_q,
 		.title = tr::lng_settings_section_chat_settings(),
 		.targetSection = ChatId(),
 		.icon = { &st::menuIconChatBubble },
@@ -426,6 +432,7 @@ void BuildSectionButtons(SectionBuilder &builder) {
 		}
 
 		builder.addButton({
+			.id = u"main/folders"_q,
 			.title = tr::lng_settings_section_filters(),
 			.icon = { &st::menuIconShowInFolder },
 			.onClick = [=] { showOther(FoldersId()); },
@@ -434,7 +441,16 @@ void BuildSectionButtons(SectionBuilder &builder) {
 		});
 	}
 
+	if (Chatcraft::Enabled()) {
+		builder.addButton({
+			.title = rpl::single(u"Chatcraft"_q),
+			.icon = { &st::menuIconManage },
+			.onClick = [=] { showOther(Chatcraft::SettingsId()); },
+		});
+	}
+
 	builder.addSectionButton({
+		.id = u"main/advanced"_q,
 		.title = tr::lng_settings_advanced(),
 		.targetSection = AdvancedId(),
 		.icon = { &st::menuIconManage },
@@ -442,6 +458,7 @@ void BuildSectionButtons(SectionBuilder &builder) {
 	});
 
 	builder.addSectionButton({
+		.id = u"main/devices"_q,
 		.title = tr::lng_settings_section_devices(),
 		.targetSection = CallsId(),
 		.icon = { &st::menuIconUnmute },

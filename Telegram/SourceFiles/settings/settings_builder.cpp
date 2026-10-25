@@ -7,6 +7,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "settings/settings_builder.h"
 
+#include "chatcraft/chatcraft_settings.h"
+
 #include "apiwrap.h"
 #include "lang/lang_keys.h"
 #include "api/api_user_privacy.h"
@@ -252,6 +254,15 @@ Ui::RpWidget *SectionBuilder::addControl(ControlArgs &&args) {
 }
 
 Ui::SettingsButton *SectionBuilder::addButton(ButtonArgs &&args) {
+	if (Chatcraft::Enabled() && Chatcraft::UiIds().contains(args.id)) {
+		auto visible = Chatcraft::UiVisibleValue(args.id);
+		if (args.shown) {
+			args.shown = rpl::combine(std::move(args.shown), std::move(visible),
+				[](bool native, bool custom) { return native && custom; });
+		} else {
+			args.shown = std::move(visible);
+		}
+	}
 	const auto &st = args.st ? *args.st : st::settingsButton;
 	auto iconForSearch = IconDescriptor{ args.icon.icon };
 	const auto factory = [&](not_null<Ui::VerticalLayout*> container) {
@@ -292,6 +303,7 @@ Ui::SettingsButton *SectionBuilder::addSectionButton(SectionArgs &&args) {
 	const auto showOther = wctx ? wctx->showOther : nullptr;
 	const auto target = args.targetSection;
 	return addButton({
+		.id = std::move(args.id),
 		.title = std::move(args.title),
 		.icon = std::move(args.icon),
 		.onClick = [=] { showOther(target); },

@@ -20,12 +20,16 @@ IndexedList::IndexedList(SortMode sortMode, FilterId filterId)
 , _empty(sortMode, filterId) {
 }
 
-RowsByLetter IndexedList::addToEnd(Key key) {
+RowsByLetter IndexedList::addToEnd(Key key, bool indexName) {
 	if (const auto row = _list.getRow(key)) {
 		return { row };
 	}
 
 	auto result = RowsByLetter{ _list.addToEnd(key) };
+	if (!indexName) {
+		++_dateVersion;
+		return result;
+	}
 	for (const auto &ch : key.entry()->chatListFirstLetters()) {
 		auto j = _index.find(ch);
 		if (j == _index.cend()) {

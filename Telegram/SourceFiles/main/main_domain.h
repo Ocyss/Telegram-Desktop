@@ -36,8 +36,13 @@ public:
 		std::unique_ptr<Account> account;
 	};
 
+#ifdef CHATCRAFT_ENABLED
+	static constexpr auto kMaxAccounts = CHATCRAFT_MAX_ACCOUNTS;
+	static constexpr auto kPremiumMaxAccounts = CHATCRAFT_MAX_ACCOUNTS;
+#else
 	static constexpr auto kMaxAccounts = 3;
 	static constexpr auto kPremiumMaxAccounts = 6;
+#endif // CHATCRAFT_ENABLED
 
 	explicit Domain(const QString &dataName);
 	~Domain();

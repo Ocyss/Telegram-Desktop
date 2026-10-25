@@ -22,6 +22,10 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "ui/rp_widget.h"
 #include "ui/userpic_view.h"
 
+namespace Chatcraft {
+class ChatList;
+} // namespace Chatcraft
+
 namespace style {
 struct DialogRow;
 struct DialogRightButton;
@@ -641,6 +645,7 @@ private:
 
 	const not_null<Window::SessionController*> _controller;
 
+	std::unique_ptr<Chatcraft::ChatList> _chatcraftList;
 	not_null<IndexedList*> _shownList;
 	FilterId _filterId = 0;
 	bool _mouseSelection = false;

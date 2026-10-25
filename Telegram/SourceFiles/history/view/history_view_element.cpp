@@ -7,6 +7,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "history/view/history_view_element.h"
 
+#include "chatcraft/chatcraft_settings.h"
+
 #include "apiwrap.h"
 #include "api/api_transcribes.h"
 #include "history/view/history_view_service_message.h"
@@ -1274,6 +1276,19 @@ Element::Element(
 		}
 	}
 	refreshEphemeralBadge();
+	if (Chatcraft::Enabled() && data->isSponsored()) {
+		_chatcraftLifetime = std::make_unique<rpl::lifetime>();
+		const auto hidden = _chatcraftLifetime->make_state<bool>(
+			Chatcraft::HideSponsored());
+		Chatcraft::SettingsChanges() | rpl::on_next([=] {
+			const auto now = Chatcraft::HideSponsored();
+			if (*hidden != now) {
+				*hidden = now;
+				recountAttachToPreviousInBlocks();
+				history()->owner().requestViewResize(this);
+			}
+		}, *_chatcraftLifetime);
+	}
 }
 
 bool Element::embedReactionsInBubble() const {
@@ -1635,7 +1650,8 @@ bool Element::isHiddenByGroup() const {
 }
 
 bool Element::isHidden() const {
-	return isHiddenByGroup();
+	return isHiddenByGroup()
+		|| (data()->isSponsored() && Chatcraft::HideSponsored());
 }
 
 void Element::overrideMedia(std::unique_ptr<Media> media) {

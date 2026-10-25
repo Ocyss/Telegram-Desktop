@@ -7,6 +7,9 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "dialogs/dialogs_inner_widget.h"
 
+#include "chatcraft/chatcraft_chat_list.h"
+#include "chatcraft/chatcraft_settings.h"
+
 #include "dialogs/dialogs_three_state_icon.h"
 #include "dialogs/ui/chat_search_empty.h"
 #include "dialogs/ui/chat_search_in.h"
@@ -300,6 +303,7 @@ InnerWidget::InnerWidget(
 	rpl::producer<ChildListShown> childListShown)
 : RpWidget(parent)
 , _controller(controller)
+, _chatcraftList(std::make_unique<Chatcraft::ChatList>(&controller->session()))
 , _shownList(controller->session().data().chatsList()->indexed())
 , _st(&st::defaultDialogRow)
 , _pinnedShiftAnimation([=](crl::time now) {
@@ -388,6 +392,9 @@ InnerWidget::InnerWidget(
 			&& !_openedForum
 			&& (folder == _openedFolder);
 	}) | rpl::on_next([=] {
+		if (_chatcraftList->sync(_narrowRatio)) {
+			clearSelection();
+		}
 		if (_state == WidgetState::Filtered && !_filter.isEmpty()) {
 			refreshFilterResults();
 		}
@@ -402,6 +409,7 @@ InnerWidget::InnerWidget(
 		session().data().chatsFilters().tagsEnabledChanges(
 		) | rpl::map_to(true)
 	) | rpl::on_next([=](bool refreshHeight) {
+		refreshShownList();
 		if (refreshHeight) {
 			_chatsFilterTags.clear();
 			_shownList->updateHeights(_narrowRatio);
@@ -587,6 +595,22 @@ InnerWidget::InnerWidget(
 	session().data().stories().incrementPreloadingMainSources();
 
 	handleChatListEntryRefreshes();
+	if (Chatcraft::Enabled()) {
+		const auto hiding = lifetime().make_state<bool>(
+			Chatcraft::HideGroupedChats());
+		Chatcraft::SettingsChanges() | rpl::on_next([=] {
+			const auto now = Chatcraft::HideGroupedChats();
+			if (*hiding == now) {
+				return;
+			}
+			*hiding = now;
+			stopReorderPinned();
+			clearSelection();
+			refreshShownList();
+			refreshWithCollapsedRows();
+		}, lifetime());
+	}
+	refreshShownList();
 
 	refreshWithCollapsedRows(true);
 
@@ -2704,6 +2728,9 @@ const std::vector<Key> &InnerWidget::pinnedChatsOrder() const {
 }
 
 void InnerWidget::checkReorderPinnedStart(QPoint localPosition) {
+	if (_chatcraftList->active()) {
+		return;
+	}
 	if (!_pressed
 		|| _dragging
 		|| (_state != WidgetState::Default)
@@ -3324,8 +3351,12 @@ void InnerWidget::dialogRowReplaced(
 
 void InnerWidget::handleChatListEntryRefreshes() {
 	using Event = Data::Session::ChatListEntryRefresh;
-	session().data().chatListEntryRefreshes(
-	) | rpl::filter([=](const Event &event) {
+	const auto coalesced = lifetime().make_state<rpl::event_stream<Event>>();
+	const auto pending = lifetime().make_state<base::flat_set<Key>>();
+	coalesced->events() | rpl::filter([=](const Event &event) {
+		if (_chatcraftList->active()) {
+			return true;
+		}
 		if (event.filterId != _filterId) {
 			return false;
 		} else if (const auto topic = event.key.topic()) {
@@ -3410,6 +3441,36 @@ void InnerWidget::handleChatListEntryRefreshes() {
 				std::abs(from - to) + event.moved.height);
 		}
 	}, lifetime());
+
+	session().data().chatListEntryRefreshes(
+	) | rpl::on_next([=](const Event &event) {
+		if (!_chatcraftList->active()) {
+			coalesced->fire_copy(event);
+			return;
+		}
+		const auto schedule = pending->empty();
+		pending->emplace(event.key);
+		if (!schedule) {
+			return;
+		}
+		Ui::PostponeCall(crl::guard(this, [=] {
+			const auto keys = base::take(*pending);
+			if (!_chatcraftList->active()) {
+				return;
+			}
+			for (const auto key : keys) {
+				const auto change = _chatcraftList->update(key, _narrowRatio);
+				updateDialogRow({ key, FullMsgId() });
+				if (change) {
+					coalesced->fire(Event{
+						.key = key,
+						.moved = change.moved,
+						.existenceChanged = change.existenceChanged,
+					});
+				}
+			}
+		}));
+	}, lifetime());
 }
 
 void InnerWidget::repaintCollapsedFolderRow(not_null<Data::Folder*> folder) {
@@ -3433,6 +3494,13 @@ int InnerWidget::defaultRowTop(not_null<Row*> row) const {
 void InnerWidget::repaintDialogRow(
 		FilterId filterId,
 		not_null<Row*> row) {
+	if (_chatcraftList->active() && _state == WidgetState::Default) {
+		const auto shown = _shownList->getRow(row->key());
+		if (!shown) {
+			return;
+		}
+		row = shown;
+	}
 	if (!animatedPreviewCached(row)) {
 		invalidateCachedRow(RowsCacheKey(row->entry()));
 	}
@@ -3599,6 +3667,9 @@ void InnerWidget::enterEventHook(QEnterEvent *e) {
 }
 
 Row *InnerWidget::shownRowByKey(Key key) {
+	if (_chatcraftList->active()) {
+		return _shownList->getRow(key);
+	}
 	const auto entry = key.entry();
 	if (_savedSublists) {
 		const auto sublist = entry->asSublist();
@@ -3828,7 +3899,7 @@ void InnerWidget::updateSelectedRow(Key key) {
 }
 
 void InnerWidget::refreshShownList() {
-	const auto list = _savedSublists
+	const auto source = _savedSublists
 		? _savedSublists->chatsList()->indexed()
 		: _openedForum
 		? _openedForum->topicsList()->indexed()
@@ -3837,11 +3908,17 @@ void InnerWidget::refreshShownList() {
 		: _filterId
 		? session().data().chatsFilters().chatsList(_filterId)->indexed()
 		: session().data().chatsList(_openedFolder)->indexed();
+	const auto list = _chatcraftList->show(source,
+		!_savedSublists && !_openedForum && !_openedCommunity
+			&& !_filterId && !_openedFolder);
 	if (_shownList != list) {
 		_shownList->unfreeze();
 		_shownList = list;
 		_shownList->updateHeights(_narrowRatio);
 		_activeSubItemsRow = nullptr;
+	}
+	if (_chatcraftList->sync(_narrowRatio)) {
+		clearSelection();
 	}
 }
 
@@ -4181,7 +4258,8 @@ void InnerWidget::dragPinnedFromTouch() {
 	const auto global = *_touchDragStartGlobal;
 	_touchDragPinnedTimer.cancel();
 	selectByMouse(global);
-	if (!_selected || _dragging || _state != WidgetState::Default) {
+	if (!_selected || _dragging || _state != WidgetState::Default
+			|| _chatcraftList->active()) {
 		return;
 	}
 	_dragStart = mapFromGlobal(global);

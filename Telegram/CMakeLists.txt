@@ -111,6 +111,10 @@ PRIVATE
     desktop-app::external_xxhash
 )
 
+if (CHATCRAFT_ENABLED AND WIN32)
+    target_link_libraries(Telegram PRIVATE advapi32 bcrypt ntdll userenv ws2_32)
+endif()
+
 if (NOT DESKTOP_APP_DISABLE_SWIFT6)
     telegram_add_apple_swift_runtime(Telegram)
 endif()
@@ -119,6 +123,12 @@ target_precompile_headers(Telegram PRIVATE $<$<COMPILE_LANGUAGE:CXX,OBJCXX>:${sr
 nice_target_sources(Telegram ${src_loc}
 PRIVATE
     ${style_files}
+
+    chatcraft/chatcraft_settings.cpp
+    chatcraft/chatcraft_settings.h
+    chatcraft/chatcraft_settings_section.cpp
+    chatcraft/chatcraft_chat_list.cpp
+    chatcraft/chatcraft_chat_list.h
 
     api/api_attached_stickers.cpp
     api/api_attached_stickers.h

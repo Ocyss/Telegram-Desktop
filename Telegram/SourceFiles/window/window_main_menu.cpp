@@ -7,6 +7,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "window/window_main_menu.h"
 
+#include "chatcraft/chatcraft_settings.h"
+
 #include "apiwrap.h"
 #include "base/event_filter.h"
 #include "base/qt_signal_producer.h"
@@ -660,7 +662,18 @@ void MainMenu::setupMenu() {
 	const auto controller = _controller;
 	const auto addAction = [&](
 			rpl::producer<QString> text,
-			IconDescriptor &&descriptor) {
+			IconDescriptor &&descriptor,
+			QString id = {}) -> not_null<Ui::SettingsButton*> {
+		if (Chatcraft::Enabled() && !id.isEmpty()) {
+			const auto wrap = _menu->add(
+				object_ptr<Ui::SlideWrap<Ui::SettingsButton>>(
+					_menu,
+					CreateButtonWithIcon(_menu, std::move(text),
+						st::mainMenuButton, std::move(descriptor))));
+			wrap->toggleOn(Chatcraft::UiVisibleValue(std::move(id)));
+			wrap->finishAnimating();
+			return wrap->entity();
+		}
 		return AddButtonWithIcon(
 			_menu,
 			std::move(text),
@@ -687,7 +700,7 @@ void MainMenu::setupMenu() {
 
 		AddMyChannelsBox(addAction(
 			tr::lng_create_group_title(),
-			{ &st::menuIconGroups }
+			{ &st::menuIconGroups }, u"main-menu/create-group"_q
 		), controller, true)->addClickHandler([=](Qt::MouseButton which) {
 			if (which == Qt::LeftButton) {
 				controller->showNewGroup();
@@ -696,7 +709,7 @@ void MainMenu::setupMenu() {
 
 		AddMyChannelsBox(addAction(
 			tr::lng_create_channel_title(),
-			{ &st::menuIconChannel }
+			{ &st::menuIconChannel }, u"main-menu/create-channel"_q
 		), controller, false)->addClickHandler([=](Qt::MouseButton which) {
 			if (which == Qt::LeftButton) {
 				controller->showNewChannel();
@@ -705,19 +718,19 @@ void MainMenu::setupMenu() {
 
 		addAction(
 			tr::lng_menu_contacts(),
-			{ &st::menuIconUserShow }
+			{ &st::menuIconUserShow }, u"main-menu/contacts"_q
 		)->setClickedCallback([=] {
 			controller->show(PrepareContactsBox(controller));
 		});
 		addAction(
 			tr::lng_menu_calls(),
-			{ &st::menuIconPhone }
+			{ &st::menuIconPhone }, u"main-menu/calls"_q
 		)->setClickedCallback([=] {
 			::Calls::ShowCallsBox(controller);
 		});
 		addAction(
 			tr::lng_saved_messages(),
-			{ &st::menuIconSavedMessages }
+			{ &st::menuIconSavedMessages }, u"main-menu/saved-messages"_q
 		)->setClickedCallback([=] {
 			controller->showPeerHistory(controller->session().user());
 		});
@@ -769,14 +782,21 @@ void MainMenu::setupMenu() {
 	}
 	addAction(
 		tr::lng_menu_settings(),
-		{ &st::menuIconSettings }
+		{ &st::menuIconSettings }, u"main-menu/settings"_q
 	)->setClickedCallback([=] {
 		controller->showSettings();
 	});
 
+	if (Chatcraft::Enabled()) {
+		addAction(rpl::single(u"Chatcraft"_q), { &st::menuIconManage }
+		)->setClickedCallback([=] {
+			controller->showSettings(Chatcraft::SettingsId());
+		});
+	}
+
 	_nightThemeToggle = addAction(
 		tr::lng_menu_night_mode(),
-		{ &st::menuIconNightMode }
+		{ &st::menuIconNightMode }, u"main-menu/night-mode"_q
 	)->toggleOn(_nightThemeSwitches.events_starting_with(
 		Window::Theme::IsNightMode()
 	));
