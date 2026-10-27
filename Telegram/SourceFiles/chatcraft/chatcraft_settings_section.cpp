@@ -13,6 +13,7 @@
 #include "ui/vertical_list.h"
 #include "ui/ui_utility.h"
 #include "ui/widgets/buttons.h"
+#include "ui/widgets/scroll_area.h"
 
 namespace Chatcraft {
 namespace {
@@ -51,12 +52,24 @@ public:
 			content,
 			st::defaultInputField,
 			tr::lng_dlg_filter()), st::settingsCheckboxPadding);
+		const auto listHeight = st::defaultInputField.height * 6;
+		const auto listContainer = content->add(
+			object_ptr<Ui::RpWidget>(content));
+		listContainer->setFixedHeight(listHeight);
+		const auto scroll = Ui::CreateChild<Ui::ScrollArea>(listContainer);
+		const auto rows = scroll->setOwnedWidget(
+			object_ptr<Ui::VerticalLayout>(scroll));
+		listContainer->widthValue() | rpl::on_next([=](int width) {
+			scroll->setGeometry(0, 0, width, listHeight);
+			rows->resizeToWidth(width);
+		}, scroll->lifetime());
+		scroll->show();
 		for (const auto &id : UiIds()) {
-			const auto wrap = content->add(
+			const auto wrap = rows->add(
 				object_ptr<Ui::SlideWrap<Ui::Checkbox>>(
-					content,
+					rows,
 					object_ptr<Ui::Checkbox>(
-						content, id, UiVisible(id), st::settingsCheckbox),
+						rows, id, UiVisible(id), st::settingsCheckbox),
 					st::settingsCheckboxPadding));
 			const auto checkbox = wrap->entity();
 			wrap->toggleOn(rpl::single(true) | rpl::then(

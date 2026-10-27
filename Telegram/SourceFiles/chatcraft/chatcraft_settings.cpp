@@ -168,34 +168,18 @@ bool HideChat(bool mainList, bool inCustomFolder) {
 }
 
 QStringList UiIds() {
-	return {
-		u"main/profile"_q,
-		u"main/notifications"_q,
-		u"main/privacy"_q,
-		u"main/chat"_q,
-		u"main/folders"_q,
-		u"main/advanced"_q,
-		u"main/devices"_q,
-		u"main/power"_q,
-		u"main/language"_q,
-		u"main/currency"_q,
-		u"main/business"_q,
-		u"main/send-gift"_q,
-		u"main/faq"_q,
-		u"main/features"_q,
-		u"main/ask-question"_q,
-		u"main-menu/create-group"_q,
-		u"main-menu/create-channel"_q,
-		u"main-menu/contacts"_q,
-		u"main-menu/calls"_q,
-		u"main-menu/saved-messages"_q,
-		u"main-menu/settings"_q,
-		u"main-menu/night-mode"_q,
+#ifdef CHATCRAFT_ENABLED
+	static const auto result = QStringList{
+#include "chatcraft_ui_ids.inc"
 	};
+	return result;
+#else
+	return {};
+#endif // CHATCRAFT_ENABLED
 }
 
 bool UiVisible(const QString &id) {
-	if (!UiIds().contains(id)) {
+	if (id.isEmpty()) {
 		return true;
 	}
 #ifdef CHATCRAFT_ENABLED

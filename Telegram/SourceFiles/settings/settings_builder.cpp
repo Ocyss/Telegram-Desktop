@@ -206,9 +206,20 @@ Ui::RpWidget *SectionBuilder::add(
 		v::match(ctx, [&](const WidgetContext &wctx) {
 			if (auto w = widget ? widget(wctx) : WidgetToAdd()) {
 				result = w.widget.data();
-				wctx.container->add(std::move(w.widget), w.margin, w.align);
+				auto entry = search ? search() : SearchEntry();
+				if (Chatcraft::Enabled() && !entry.id.isEmpty()) {
+					const auto wrap = wctx.container->add(
+						object_ptr<Ui::SlideWrap<Ui::RpWidget>>(
+							wctx.container,
+							std::move(w.widget),
+							w.margin), {}, w.align);
+					wrap->toggleOn(Chatcraft::UiVisibleValue(entry.id));
+					wrap->finishAnimating();
+				} else {
+					wctx.container->add(std::move(w.widget), w.margin, w.align);
+				}
 
-				if (auto entry = search ? search() : SearchEntry()) {
+				if (entry) {
 					if (wctx.highlights) {
 						wctx.highlights->push_back({
 							std::move(entry.id),
@@ -254,15 +265,6 @@ Ui::RpWidget *SectionBuilder::addControl(ControlArgs &&args) {
 }
 
 Ui::SettingsButton *SectionBuilder::addButton(ButtonArgs &&args) {
-	if (Chatcraft::Enabled() && Chatcraft::UiIds().contains(args.id)) {
-		auto visible = Chatcraft::UiVisibleValue(args.id);
-		if (args.shown) {
-			args.shown = rpl::combine(std::move(args.shown), std::move(visible),
-				[](bool native, bool custom) { return native && custom; });
-		} else {
-			args.shown = std::move(visible);
-		}
-	}
 	const auto &st = args.st ? *args.st : st::settingsButton;
 	auto iconForSearch = IconDescriptor{ args.icon.icon };
 	const auto factory = [&](not_null<Ui::VerticalLayout*> container) {
@@ -419,26 +421,33 @@ Ui::Checkbox *SectionBuilder::addCheckbox(CheckboxArgs &&args) {
 }
 
 void SectionBuilder::addSubsectionTitle(SubsectionTitleArgs &&args) {
-	v::match(_context, [&](const WidgetContext &ctx) {
-		const auto title = AddSubsectionTitle(
-			ctx.container,
-			rpl::duplicate(args.title));
-		if (!args.id.isEmpty() && ctx.highlights) {
-			ctx.highlights->push_back({
-				args.id,
-				{ title.get(), SubsectionTitleHighlight() },
-			});
-		}
-	}, [&](const SearchContext &ctx) {
-		if (!args.id.isEmpty()) {
-			ctx.entries->push_back({
-				.id = std::move(args.id),
-				.title = ResolveTitle(std::move(args.title)),
-				.keywords = std::move(args.keywords),
-				.section = ctx.sectionId,
-			});
-		}
-	});
+	const auto build = [&] {
+		v::match(_context, [&](const WidgetContext &ctx) {
+			const auto title = AddSubsectionTitle(
+				ctx.container,
+				rpl::duplicate(args.title));
+			if (!args.id.isEmpty() && ctx.highlights) {
+				ctx.highlights->push_back({
+					args.id,
+					{ title.get(), SubsectionTitleHighlight() },
+				});
+			}
+		}, [&](const SearchContext &ctx) {
+			if (!args.id.isEmpty()) {
+				ctx.entries->push_back({
+					.id = std::move(args.id),
+					.title = ResolveTitle(std::move(args.title)),
+					.keywords = std::move(args.keywords),
+					.section = ctx.sectionId,
+				});
+			}
+		});
+	};
+	if (Chatcraft::Enabled() && !args.id.isEmpty()) {
+		scope(build, Chatcraft::UiVisibleValue(args.id));
+	} else {
+		build();
+	}
 }
 
 void SectionBuilder::addSubsectionTitle(rpl::producer<QString> text) {
