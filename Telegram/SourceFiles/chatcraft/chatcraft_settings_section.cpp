@@ -52,7 +52,7 @@ public:
 			content,
 			st::defaultInputField,
 			tr::lng_dlg_filter()), st::settingsCheckboxPadding);
-		const auto listHeight = st::defaultInputField.height * 6;
+		const auto listHeight = search->height() * 6;
 		const auto listContainer = content->add(
 			object_ptr<Ui::RpWidget>(content));
 		listContainer->setFixedHeight(listHeight);
