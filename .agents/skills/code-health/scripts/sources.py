@@ -6,6 +6,7 @@ import subprocess
 
 SOURCE_ROOT = 'Telegram/SourceFiles'
 LIB_PREFIX = 'Telegram/lib_'
+LANG_FILE = 'Telegram/Resources/langs/lang.strings'
 TOP_LEVEL = ('SourceFiles', 'cmake', 'CMakeLists.txt')
 EXTENSIONS = (
     '.cpp', '.mm', '.c', '.cc', '.cxx', '.h', '.hpp', '.style', '.cmake',
@@ -23,6 +24,8 @@ def git(repo, *args, data=None):
 
 
 def wanted(path):
+    if path == LANG_FILE:
+        return True
     if not (path.startswith((SOURCE_ROOT + '/', LIB_PREFIX, 'Telegram/cmake/'))
             or path == 'Telegram/CMakeLists.txt'):
         return False
@@ -89,6 +92,9 @@ def from_worktree(repo):
                     text = read_text(repo / path)
                     if text is not None:
                         files[path] = text
+    lang = read_text(repo / LANG_FILE)
+    if lang is not None:
+        files[LANG_FILE] = lang
     commit = git(repo, 'rev-parse', 'HEAD').decode().strip()
     dirty = bool(git(repo, 'status', '--porcelain', '--', 'Telegram').strip())
     notes = ['working tree' + (' with local changes' if dirty else '')]
@@ -171,10 +177,13 @@ def submodule_heads(repo):
 
 
 def read_text(path):
+    """A working file's CRLF is read as LF, the form Git stores and diffs, so
+    results do not depend on the checkout's line endings."""
     try:
-        return decode(path.read_bytes())
+        text = decode(path.read_bytes())
     except OSError:
         return None
+    return None if text is None else text.replace('\r\n', '\n')
 
 
 def decode(raw):

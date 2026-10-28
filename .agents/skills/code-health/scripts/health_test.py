@@ -1,12 +1,20 @@
+import contextlib
+import io
+import json
 from pathlib import Path
+import re
 import subprocess
+import sys
 import tempfile
 import textwrap
+from types import SimpleNamespace
 import unittest
 
+import atlas
 import clones
 import cmake_model
 import cpp_text
+import health
 import includes
 import metrics
 import report
@@ -64,6 +72,35 @@ APP = dedent('''
     } // namespace App
 ''')
 
+PANEL = dedent('''
+    #include "low/low.h"
+
+    namespace Low {
+
+    class Panel {
+    public:
+    	void resize(int width);
+    	void finalizeLayout(int width);
+
+    private:
+    	int _width = 0;
+
+    };
+
+    void Panel::resize(int width) {
+    	if (_width != width) {
+    		finalizeLayout(width);
+    	}
+    }
+
+    // keeps the width positive, as std::max(width, 1) does in callers
+    void Panel::finalizeLayout(int width) {
+    	_width = width;
+    }
+
+    } // namespace Low
+''')
+
 
 class Repo:
     def __init__(self, files):
@@ -81,11 +118,14 @@ class Repo:
             ['git', '-C', str(self.root), *args],
             capture_output=True, check=True).stdout.decode()
 
-    def write(self, files):
+    def write(self, files, newline=None):
         for path, text in files.items():
             target = self.root / path
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(text, encoding='utf-8')
+            if newline is None:
+                target.write_text(text, encoding='utf-8')
+            else:
+                target.write_bytes(text.replace('\n', newline).encode('utf-8'))
 
     def remove(self, path):
         (self.root / path).unlink()
@@ -167,6 +207,18 @@ class TextTests(unittest.TestCase):
         lines = cpp_text.code_lines('/*\nThis file is part of X\n*/\nint a = 0;')
         self.assertEqual([cpp_text.normalize(line) for line in lines],
                          ['', '', '', 'int a = 0;'])
+
+    def test_numeric_literal_letters_are_not_names(self):
+        literals = ('1e-4', '0x1F', '10ull', '0.5f', '.5f', '0b1010', '0x1.fp+2F',
+                    "1'000ULL", '1e+4', '42_units')
+        for literal in literals:
+            with self.subTest(literal=literal):
+                line = f'constexpr auto kScaled1 = kBaseStep * {literal} + kBaseStep;'
+                self.assertEqual(review.identifiers(line),
+                                 ['constexpr', 'auto', 'kScaled1', 'kBaseStep', 'kBaseStep'])
+
+    def test_nonmatching_pattern_does_not_declare(self):
+        self.assertFalse(metrics.declares('constexpr auto kEpsilon = 1e-4;', re.compile(r'\be\b')))
 
 
 class GraphTests(unittest.TestCase):
@@ -358,6 +410,93 @@ class CheckTests(unittest.TestCase):
         self.assertIn('app/user.cpp', stranded[0])
         self.assertNotIn('app/other.cpp', stranded[0])
 
+    def test_removed_last_use_reports_orphaned_helper(self):
+        src = 'Telegram/SourceFiles/'
+        helper = 'int Helper(int value) {\n\treturn value + 1;\n}\n\n'
+        caller = 'int Caller(int value) {\n\treturn Helper(value);\n}\n'
+        self.repo.write({src + 'low/low.cpp': LOW + '\n' + helper + caller})
+        self.repo.git('commit', '-qam', 'Helper.')
+        self.repo.write({src + 'low/low.cpp': LOW + '\n' + helper})
+        _, warnings = self.run_check()
+        self.assertTrue(any(w.startswith('Helper:') and 'last use' in w for w in warnings), warnings)
+
+    def test_base_class_mention_is_a_use(self):
+        src = 'Telegram/SourceFiles/'
+        base = 'class Host {\npublic:\n\tvirtual ~Host() = default;\n};\n'
+        impl = 'class Engine::Impl final : public Host {\n};\n'
+        user = 'class Fake final : public Host {\n};\n'
+        self.repo.write({
+            src + 'low/host.h': '#pragma once\n\n' + base,
+            src + 'low/engine.cpp': impl,
+            src + 'low/fake.cpp': user,
+        })
+        self.repo.git('add', '-A')
+        self.repo.git('commit', '-qm', 'Host.')
+        self.repo.remove(src + 'low/fake.cpp')
+        _, warnings = self.run_check()
+        self.assertFalse(any(w.startswith('Host:') for w in warnings), warnings)
+
+    def test_removed_last_use_reports_orphaned_style_and_key(self):
+        src = 'Telegram/SourceFiles/'
+        style = 'using "ui/basic.style";\n\nmenuIconUnique: icon {{ "menu/unique", menuIconColor }};\nmenuIconShared: icon {{ "menu/shared", menuIconColor }};\n'
+        lang = '"lng_unique_label" = "Unique";\n"lng_shared_label" = "Shared";\n'
+        use = ('void Fill() {\n\tuse(st::menuIconUnique, tr::lng_unique_label(tr::now));\n'
+               '\tuse(st::menuIconShared, tr::lng_shared_label(tr::now));\n}\n')
+        other = 'void Other() {\n\tuse(st::menuIconShared, tr::lng_shared_label(tr::now));\n}\n'
+        self.repo.write({
+            src + 'ui/menu_icons.style': style,
+            'Telegram/Resources/langs/lang.strings': lang,
+            src + 'low/fill.cpp': use,
+            src + 'app/other.cpp': other,
+        })
+        self.repo.git('add', '-A')
+        self.repo.git('commit', '-qm', 'Styles.')
+        self.repo.write({src + 'low/fill.cpp': use.replace(
+            '\tuse(st::menuIconUnique, tr::lng_unique_label(tr::now));\n', '')})
+        _, warnings = self.run_check()
+        orphans = [w.split(':')[0] for w in warnings if 'last use' in w]
+        self.assertEqual(sorted(orphans), ['lng_unique_label', 'menuIconUnique'], warnings)
+
+    def test_removed_numeric_literals_keep_the_check_running(self):
+        src = 'Telegram/SourceFiles/'
+        constants = ('constexpr auto kEpsilon = 1e-4;\nconstexpr auto kMask = 0x1F;\n'
+                     'constexpr auto kLimit = 10ull;\nconstexpr auto kHalf = 0.5f;\n\n')
+        self.repo.write({src + 'low/low.cpp': LOW.replace(
+            'namespace Low {\n\n', 'namespace Low {\n\n' + constants)})
+        self.repo.git('commit', '-qam', 'Constants.')
+        self.repo.write({src + 'low/low.cpp': LOW})
+        self.assertEqual(self.run_check(), ([], []))
+
+    def test_last_use_beside_a_numeric_literal_reports_orphan(self):
+        src = 'Telegram/SourceFiles/'
+        step = 'constexpr auto kBaseStep = 4;\n'
+        scaled = 'constexpr auto kScaled = kBaseStep * 1e-4;\n'
+        self.repo.write({src + 'low/low.cpp': LOW.replace(
+            'namespace Low {\n\n', 'namespace Low {\n\n' + step + scaled + '\n')})
+        self.repo.git('commit', '-qam', 'Scaled.')
+        self.repo.write({src + 'low/low.cpp': LOW.replace(
+            'namespace Low {\n\n', 'namespace Low {\n\n' + step + '\n')})
+        errors, warnings = self.run_check()
+        self.assertEqual(errors, [])
+        self.assertEqual(len(warnings), 1, warnings)
+        self.assertTrue(warnings[0].startswith('kBaseStep:'), warnings)
+        self.assertIn('the change removed its last use; only its definition remains',
+                      warnings[0], warnings)
+        self.assertIn(src + 'low/low.cpp', warnings[0], warnings)
+
+    def test_removed_style_definition_still_used_is_reported(self):
+        src = 'Telegram/SourceFiles/'
+        style = 'menuIconGone: icon {{ "menu/gone", menuIconColor }};\n'
+        self.repo.write({
+            src + 'ui/menu_icons.style': style,
+            src + 'platform/win/menu_win.cpp': 'void Use() {\n\tuse(st::menuIconGone);\n}\n',
+        })
+        self.repo.git('add', '-A')
+        self.repo.git('commit', '-qm', 'Style.')
+        self.repo.write({src + 'ui/menu_icons.style': '\n'})
+        _, warnings = self.run_check()
+        self.assertTrue(any(w.startswith('menuIconGone:') and 'menu_win.cpp' in w for w in warnings), warnings)
+
     def test_complete_deletion_is_clean(self):
         src = 'Telegram/SourceFiles/'
         self.repo.write({
@@ -379,6 +518,51 @@ class CheckTests(unittest.TestCase):
         _, warnings = self.run_check()
         self.assertFalse(any(w.startswith('Twice:') for w in warnings), warnings)
 
+    def commit_panel(self):
+        path = 'Telegram/SourceFiles/low/panel.cpp'
+        self.repo.write({'.gitattributes': '* text=auto\n', path: PANEL}, newline='\n')
+        self.assertNotIn(b'\r\n', (self.repo.root / path).read_bytes())
+        self.repo.git('add', '-A')
+        self.repo.git('commit', '-qm', 'Panel.')
+        self.assertNotIn('\r\n', self.repo.git('show', 'HEAD:' + path))
+        return path
+
+    def test_crlf_tree_keeps_a_commented_definition(self):
+        path = self.commit_panel()
+        grown = PANEL.replace('} // namespace Low\n',
+                              'int Unrelated() {\n\treturn 0;\n}\n\n} // namespace Low\n')
+        self.repo.write({path: grown}, newline='\r\n')
+        self.assertIn(b'\r\n', (self.repo.root / path).read_bytes())
+        crlf = self.run_check()
+        self.repo.write({path: grown}, newline='\n')
+        self.assertNotIn(b'\r\n', (self.repo.root / path).read_bytes())
+        lf = self.run_check()
+        with self.subTest('CRLF keeps the definition'):
+            self.assertFalse(any('definition removed' in w for w in crlf[1]), crlf[1])
+        with self.subTest('CRLF equals LF'):
+            self.assertEqual(crlf, lf)
+        with self.subTest('LF is clean'):
+            self.assertEqual(lf, ([], []))
+
+    def test_crlf_tree_still_reports_a_removed_definition(self):
+        path = self.commit_panel()
+        definition = ('// keeps the width positive, as std::max(width, 1) does in callers\n'
+                      'void Panel::finalizeLayout(int width) {\n\t_width = width;\n}\n\n')
+        removed = PANEL.replace(definition, '')
+        self.assertNotEqual(removed, PANEL)
+        self.repo.write({path: removed}, newline='\r\n')
+        self.assertIn(b'\r\n', (self.repo.root / path).read_bytes())
+        crlf = self.run_check()
+        self.repo.write({path: removed}, newline='\n')
+        self.assertNotIn(b'\r\n', (self.repo.root / path).read_bytes())
+        lf = self.run_check()
+        errors, warnings = crlf
+        self.assertEqual(errors, [])
+        self.assertEqual(len(warnings), 1, warnings)
+        self.assertTrue(warnings[0].startswith('finalizeLayout:'), warnings)
+        self.assertIn('definition removed but still mentioned', warnings[0], warnings)
+        self.assertEqual(crlf, lf)
+
 
 class VerifyTests(unittest.TestCase):
     def test_deleted_candidate_is_resolved(self):
@@ -389,7 +573,7 @@ class VerifyTests(unittest.TestCase):
 
         def verify():
             return subprocess.run(
-                ['python3', str(script), '--repo', str(repo.root), 'verify', identity],
+                [sys.executable, str(script), '--repo', str(repo.root), 'verify', identity],
                 capture_output=True, text=True)
 
         before = verify()
@@ -401,10 +585,140 @@ class VerifyTests(unittest.TestCase):
         self.assertEqual(after.returncode, 0, after.stdout + after.stderr)
         self.assertIn('resolved', after.stdout)
         typo = subprocess.run(
-            ['python3', str(script), '--repo', str(repo.root), 'verify', 'clone:000000000000'],
+            [sys.executable, str(script), '--repo', str(repo.root), 'verify', 'clone:000000000000'],
             capture_output=True, text=True)
         self.assertEqual(typo.returncode, 2)
         self.assertIn('unknown', typo.stdout)
+
+
+class AtlasTests(unittest.TestCase):
+    TEXT = dedent("""
+        # Source atlas
+
+        ## Model
+
+        ### low — Low-level helpers
+        - Paths: `SourceFiles/low/`
+        - Owns arithmetic.
+
+        ### app — Application
+        - Paths: `SourceFiles/app/`, `SourceFiles/low/special_*`, `SourceFiles/low/low.h`
+        - Owns the entry point.
+    """)
+
+    def test_most_specific_pattern_wins(self):
+        parsed = atlas.Atlas(self.TEXT)
+        self.assertEqual(parsed.area_of('Telegram/SourceFiles/low/low.cpp'), 'low')
+        self.assertEqual(parsed.area_of('Telegram/SourceFiles/low/special_case.cpp'), 'app')
+        self.assertEqual(parsed.area_of('Telegram/SourceFiles/app/app.cpp'), 'app')
+        self.assertIsNone(parsed.area_of('Telegram/SourceFiles/other/x.cpp'))
+
+    def test_check_reports_unmapped_and_unused(self):
+        repo = Repo(dict(fixture(), **{
+            'Telegram/SourceFiles/other/other.cpp': 'void Other() {\n}\n',
+        }))
+        self.addCleanup(repo.temp.cleanup)
+        tree = sources.from_worktree(repo.root)
+        result = atlas.check(atlas.Atlas(self.TEXT), tree)
+        self.assertEqual(result['unmapped'], ['Telegram/SourceFiles/other/other.cpp'])
+        self.assertEqual(result['unused'], [('app', 'SourceFiles/low/special_*')])
+
+    def test_scan_names_areas_by_the_atlas(self):
+        repo = Repo(dict(fixture(), **{atlas.ATLAS_PATH: self.TEXT}))
+        self.addCleanup(repo.temp.cleanup)
+        snap = report.snapshot(sources.from_worktree(repo.root))
+        self.assertEqual(snap['files']['Telegram/SourceFiles/low/low.cpp']['area'], 'low')
+        self.assertEqual(snap['files']['Telegram/SourceFiles/low/low.h']['area'], 'app')
+        found = report.findings(snap)
+        self.assertIn('stale-atlas:app:SourceFiles/low/special_*', found)
+        self.assertNotIn(f'stale-map:{atlas.ATLAS_PATH}', found)
+
+    def test_large_directories_split_into_large_subdirectories(self):
+        files = {
+            'Telegram/SourceFiles/big/a.cpp': 20000,
+            'Telegram/SourceFiles/big/sub/b.cpp': 15000,
+            'Telegram/SourceFiles/big/tiny/c.cpp': 500,
+            'Telegram/SourceFiles/small/d.cpp': 1000,
+        }
+        folders, _ = atlas.candidates(files)
+        self.assertEqual(folders, {
+            'Telegram/SourceFiles',
+            'Telegram/SourceFiles/big',
+            'Telegram/SourceFiles/big/sub',
+            'Telegram/SourceFiles/small',
+        })
+        self.assertEqual(atlas.owner('Telegram/SourceFiles/big/tiny/c.cpp', folders),
+                         'Telegram/SourceFiles/big')
+
+
+class StateTests(unittest.TestCase):
+    def setUp(self):
+        self.repo = Repo(fixture())
+        self.addCleanup(self.repo.temp.cleanup)
+        queue = tempfile.TemporaryDirectory()
+        self.addCleanup(queue.cleanup)
+        self.queue = Path(queue.name)
+        self.published = self.queue / 'code-health'
+        self.state = self.queue / 'worktree' / 'code-health'
+        self.commit = self.repo.git('rev-parse', 'HEAD').strip()
+
+    def run_health(self, handler, **values):
+        args = dict(repo=str(self.repo.root), queue=str(self.queue), ref='HEAD',
+                    fetch=False, state=None, force=False)
+        args.update(values)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = handler(SimpleNamespace(**args))
+        return code, output.getvalue()
+
+    def test_recorded_scan_writes_state_once_a_day(self):
+        _, output = self.run_health(health.command_scan, state=str(self.state))
+        self.assertEqual(json.loads(output)['ledger'], str(self.state / 'ledger.json'))
+        ledger = json.loads((self.state / 'ledger.json').read_text(encoding='utf-8'))
+        self.assertEqual(ledger['commit'], self.commit)
+        self.assertTrue((self.state / ledger['run'] / 'report.md').is_file())
+        self.assertTrue((self.state / ledger['run'] / 'harness.md').is_file())
+        harness_data = json.loads((self.state / ledger['run'] / 'harness.json').read_text())
+        self.assertEqual(harness_data['commit'], self.commit)
+        self.assertFalse(harness_data['coverage']['available'])
+        self.assertTrue((self.published / '.local' / 'snapshots'
+                         / f'{self.commit}.json').is_file())
+        _, output = self.run_health(health.command_scan, state=str(self.state))
+        self.assertIn('skipped', json.loads(output))
+        self.run_health(health.command_scan, state=str(self.state), force=True)
+        history = (self.state / 'history.jsonl').read_text(encoding='utf-8')
+        self.assertEqual(len(history.splitlines()), 2)
+
+    def test_working_tree_scan_leaves_the_ledger_alone(self):
+        _, output = self.run_health(health.command_scan, ref=None)
+        result = json.loads(output)
+        self.assertIsNone(result['ledger'])
+        self.assertTrue(Path(result['run_directory'], 'report.md').is_file())
+        self.assertFalse(self.published.exists())
+        code, _ = self.run_health(health.command_scan, ref=None, state=str(self.state))
+        self.assertEqual(code, 2)
+        self.assertFalse(self.state.exists())
+
+    def test_area_rebuilds_a_missing_snapshot_of_the_published_scan(self):
+        self.run_health(health.command_scan, state=str(self.published))
+        (self.published / '.local' / 'snapshots' / f'{self.commit}.json').unlink()
+        code, output = self.run_health(health.command_area, area='low')
+        self.assertEqual(code, 0)
+        self.assertIn('Telegram/SourceFiles/low/low.cpp', output)
+
+    def test_source_worktree_is_created_reused_and_removed(self):
+        _, output = self.run_health(health.command_worktree, remove=None)
+        path = Path(json.loads(output)['path'])
+        self.addCleanup(lambda: path.exists() and self.run_health(
+            health.command_worktree, remove=str(path)))
+        self.assertEqual(self.repo.git('-C', str(path), 'rev-parse', 'HEAD').strip(),
+                         self.commit)
+        _, again = self.run_health(health.command_worktree, remove=None)
+        self.assertEqual(Path(json.loads(again)['path']), path)
+        code, _ = self.run_health(health.command_worktree, remove=str(self.queue))
+        self.assertEqual(code, 1)
+        self.run_health(health.command_worktree, remove=str(path))
+        self.assertFalse(path.exists())
 
 
 class MoveTests(unittest.TestCase):

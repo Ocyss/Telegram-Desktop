@@ -3,6 +3,7 @@ import posixpath
 import re
 
 import cpp_text
+from sources import LANG_FILE
 
 
 LONG_FUNCTION = 150
@@ -59,6 +60,8 @@ def unused_candidates(tree):
     proven by building without them."""
     counts = {}
     for path, text in tree.files.items():
+        if path == LANG_FILE:
+            continue
         for name in cpp_text.identifiers(text):
             counts[name] = counts.get(name, 0) + 1
     result = []
@@ -109,5 +112,8 @@ def declares(line, pattern):
     used after `=` or `(` on its line."""
     if line[:1].isspace() or line.startswith((',', ':')):
         return False
-    before = line[:pattern.search(line).start()]
+    mention = pattern.search(line)
+    if mention is None:
+        return False
+    before = line[:mention.start()]
     return '=' not in before and '(' not in before

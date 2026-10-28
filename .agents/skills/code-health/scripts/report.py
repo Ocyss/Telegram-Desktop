@@ -4,10 +4,12 @@ import posixpath
 import re
 import statistics
 
+import atlas
 import clones
 import cmake_model
 import cpp_text
 import history
+import harness
 import includes
 import metrics
 
@@ -35,6 +37,10 @@ CLASS_BY_KIND = {
     'long-function': 'Q4',
     'layering': 'Q5',
     'stale-map': 'map',
+    'unmapped': 'map',
+    'stale-atlas': 'map',
+    'harness-retention': 'decision',
+    'harness-docs': 'decision',
 }
 MAP_PATH = re.compile(r'`([\w./-]+\.(?:cpp|h|mm|style))`')
 
@@ -48,6 +54,11 @@ def file_limit(path):
 
 
 def snapshot(tree, queue=None, churn_days=180, cost_days=120):
+    sources_atlas = atlas.load(tree)
+
+    def area_of(path):
+        return (sources_atlas.area_of(path) if sources_atlas else None) or metrics.area_of(path)
+
     model = cmake_model.build(tree.files)
     graph = includes.IncludeGraph(tree, model)
     cost = graph.costs()
@@ -62,9 +73,10 @@ def snapshot(tree, queue=None, churn_days=180, cost_days=120):
     layering = graph.layering()
     unused = metrics.unused_candidates(tree)
     tested = model.tested_files()
+    harness_data = harness.inspect(tree, queue)
 
     for path, entry in files.items():
-        entry['area'] = metrics.area_of(path)
+        entry['area'] = area_of(path)
         entry['churn'] = changes.get(path, 0)
         entry['hotspot'] = round(entry['churn'] * entry['lines'] / 1000, 1)
         entry['target'] = model.target_of(path)
@@ -90,20 +102,20 @@ def snapshot(tree, queue=None, churn_days=180, cost_days=120):
             area['tested_lines'] += entry['lines']
     for clone in found_clones:
         for side in ('left', 'right'):
-            area = areas.get(metrics.area_of(clone[side]['path']))
+            area = areas.get(area_of(clone[side]['path']))
             if area:
                 area['clone_lines'] += clone['lines']
     for violation in layering:
-        area = areas.get(metrics.area_of(violation['path']))
+        area = areas.get(area_of(violation['path']))
         if area:
             area['layering'] += 1
     for item in unused:
-        area = areas.get(metrics.area_of(item['path']))
+        area = areas.get(area_of(item['path']))
         if area:
             area['unused'] += 1
     per_area = {}
     for task, entry in tasks.items():
-        for area in {metrics.area_of(p) for p in entry['paths'] if p in files}:
+        for area in {area_of(p) for p in entry['paths'] if p in files}:
             per_area.setdefault(area, []).append(entry)
     for area, entries in per_area.items():
         if area in areas:
@@ -130,6 +142,17 @@ def snapshot(tree, queue=None, churn_days=180, cost_days=120):
         totals['tasks'] = len(tasks)
         totals['task_hours_median'] = round(
             statistics.median(t['hours'] for t in tasks.values()), 2)
+    totals.update({
+        'harness_modules': len(harness_data['modules']),
+        'harness_lines': sum(row['source_lines'] for row in harness_data['modules']),
+        'harness_reference_bytes': harness_data['reference_bytes'],
+    })
+    if harness_data['readme_bytes'] is not None:
+        totals['harness_readme_bytes'] = harness_data['readme_bytes']
+    if (harness_data['coverage']['available']
+            and not harness_data['coverage']['shallow_source_history']):
+        totals['harness_review_candidates'] = sum(
+            bool(row['review_reasons']) for row in harness_data['modules'])
     return {
         'schema_version': 1,
         'ref': tree.ref,
@@ -145,14 +168,17 @@ def snapshot(tree, queue=None, churn_days=180, cost_days=120):
         'unused': unused,
         'tasks': tasks,
         'maps': map_references(tree),
+        'atlas': atlas.check(sources_atlas, tree) if sources_atlas else None,
+        'harness': harness_data,
     }
 
 
 def map_references(tree):
-    """Area maps and the source paths they name that no longer exist."""
+    """Area maps and the source paths they name that no longer exist. The
+    atlas is left out: its patterns are checked as stale-atlas findings."""
     result = {}
     for path, text in tree.files.items():
-        if not path.endswith('/AGENTS.md'):
+        if not path.endswith('/AGENTS.md') or path == atlas.ATLAS_PATH:
             continue
         folder = posixpath.dirname(path)
         missing = []
@@ -171,6 +197,9 @@ def findings(snap):
     total = snap['totals']['build_work_lines'] or 1
     result = {}
 
+    def area_of(path):
+        return files[path]['area'] if path in files else metrics.area_of(path)
+
     def heat(*paths):
         return 1 + sum(files.get(p, {}).get('churn', 0) for p in paths) / 10
 
@@ -180,7 +209,7 @@ def findings(snap):
             'id': identity,
             'kind': kind,
             'class': CLASS_BY_KIND[kind],
-            'area': metrics.area_of(paths[0]) if paths else key,
+            'area': area_of(paths[0]) if paths else key,
             'title': title,
             'paths': paths,
             'score': round(impact * heat(*paths), 1),
@@ -269,6 +298,19 @@ def findings(snap):
                 + ', '.join(data['missing'][:5]),
                 [path], 5, data)
 
+    checked = snap.get('atlas') or {}
+    folders = {}
+    for path in checked.get('unmapped', ()):
+        folders.setdefault(posixpath.dirname(path), []).append(path)
+    for folder, paths in folders.items():
+        add('unmapped', folder,
+            f'{len(paths)} file(s) in {folder} match no atlas area',
+            paths, 5, {'files': paths[:20]})
+    for name, pattern in checked.get('unused', ()):
+        add('stale-atlas', f'{name}:{pattern}',
+            f'atlas area {name} names `{pattern}`, which matches no file',
+            [atlas.ATLAS_PATH], 5, {'area': name, 'pattern': pattern})
+
     hot = sorted(snap['areas'].items(), key=lambda kv: -kv[1]['hotspot'])[:20]
     for area, data in hot:
         if data['tested_lines'] == 0 and data['hotspot'] > 0:
@@ -279,17 +321,33 @@ def findings(snap):
                     'hotspot': data['hotspot'],
                 })
             result[f'untested-hot-area:{area}']['area'] = area
+    harness_data = snap.get('harness', {})
+    for row in harness_data.get('modules', ()):
+        if row['review_reasons']:
+            add('harness-retention', row['module'],
+                row['module'] + ': ' + '; '.join(row['review_reasons']),
+                row['paths'], row['source_lines'] / 1000, row)
+    if harness_data.get('modules') and (
+            harness_data['readme_bytes'] is None
+            or harness_data['readme_bytes'] >= harness.README_LIMIT
+            or harness_data['missing_references']):
+        add('harness-docs', harness.README,
+            'Harness documentation exceeds its guide budget or lacks indexed references',
+            [harness.README], 1, {
+                'readme_bytes': harness_data['readme_bytes'],
+                'limit': harness.README_LIMIT,
+                'missing_references': harness_data['missing_references'],
+            })
     return result
 
 
-def merge(previous, current, checked_at):
+def merge(previous, current, checked_at, unavailable=()):
     """Carry first-seen dates and mark vanished findings resolved."""
     ledger = {}
     old = previous.get('findings', {}) if previous else {}
     for identity, finding in current.items():
         prior = old.get(identity, {})
         finding['first_seen'] = prior.get('first_seen', checked_at)
-        finding['last_seen'] = checked_at
         finding['status'] = 'open'
         ledger[identity] = finding
     cutoff = (datetime.datetime.fromisoformat(checked_at)
@@ -297,7 +355,11 @@ def merge(previous, current, checked_at):
     for identity, finding in old.items():
         if identity in ledger:
             continue
-        if finding.get('status') in ('open', 'ignored'):
+        if finding.get('kind') in unavailable and finding.get('status') != 'resolved':
+            ledger[identity] = dict(finding, status=(
+                'ignored' if finding.get('status') == 'ignored' else 'unverified'))
+            continue
+        if finding.get('status') in ('open', 'ignored', 'unverified'):
             finding = dict(finding, status='resolved', resolved_at=checked_at)
         if finding.get('resolved_at', checked_at) >= cutoff:
             ledger[identity] = finding
@@ -327,6 +389,11 @@ def markdown(snap, ledger, previous):
         ('unused_candidates', 'Unused-function candidates'),
         ('tested_lines', 'Lines in headless test targets'),
         ('task_hours_median', 'Median task hours (Start→Approve)'),
+        ('harness_modules', 'Harness modules'),
+        ('harness_lines', 'Harness source lines'),
+        ('harness_readme_bytes', 'Mandatory harness README bytes'),
+        ('harness_reference_bytes', 'On-demand harness documentation bytes'),
+        ('harness_review_candidates', 'Harness retention review candidates'),
     ]
     for key, label in labels:
         if key not in totals:
@@ -339,7 +406,7 @@ def markdown(snap, ledger, previous):
         out.append(f'| {label} | {now:,} | {change} |')
 
     open_findings = [f for f in ledger.values() if f['status'] == 'open']
-    new = [f for f in open_findings if f['first_seen'] == f['last_seen']]
+    new = [f for f in open_findings if f['first_seen'] == snap['checked_at_utc']]
     resolved = [
         f for f in ledger.values()
         if f['status'] == 'resolved' and f.get('resolved_at') == snap['checked_at_utc']
@@ -395,4 +462,12 @@ def markdown(snap, ledger, previous):
     out += ['', 'Heaviest units (header lines compiled beyond the PCH):', '']
     for path, entry in units:
         out.append(f'- {short(path)}: {entry["weight"]:,}')
+    if 'harness' in snap:
+        coverage = snap['harness']['coverage']
+        out += ['', '## Harness lifecycle', '',
+                'See [the helper inventory](harness.md) and [consumer evidence](harness.json). '
+                'Retention findings are review signals, not Q0 deletion proof.',
+                'Usage/age coverage: ' + ('available' if coverage['available']
+                                         and not coverage['shallow_source_history']
+                                      else 'unavailable; prior retention findings are unverified') + '.']
     return '\n'.join(out) + '\n'
