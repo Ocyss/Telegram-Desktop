@@ -1800,6 +1800,7 @@ win32_win64:
         -D CMAKE_PROJECT_QtBase_INCLUDE:FILEPATH="%QT_ANGLE_CMAKE%" ^
         -D DESKTOP_APP_ANGLE_DIR:PATH="%LIBS_DIR%\\tg_angle" ^
 win:
+        -D CMAKE_EXE_LINKER_FLAGS_DEBUG:STRING="/DEBUG /PDBPAGESIZE:8192" ^
         -D OPENSSL_FOUND=1 ^
         -D OPENSSL_INCLUDE_DIR="%OPENSSL_DIR%\\include" ^
         -D LIB_EAY_DEBUG="%OPENSSL_LIBS_DIR%.dbg\\libcrypto.lib" ^
